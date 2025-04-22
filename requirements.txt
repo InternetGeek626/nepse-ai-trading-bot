@@ -4,3 +4,5 @@ vaderSentiment==3.3.2
 requests
 beautifulsoup4
 attrs
+attrs
+# Updated dependencies
