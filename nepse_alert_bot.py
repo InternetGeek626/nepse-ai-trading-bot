@@ -4,7 +4,8 @@ from datetime import datetime, time as dt_time
 import logging
 import requests
 from bs4 import BeautifulSoup
-from telebot.async_telebot import AsyncTeleBot
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
 from nepse.core import Client
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -18,7 +19,7 @@ logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 if not TELEGRAM_TOKEN:
     raise ValueError("Please set the TELEGRAM_TOKEN environment variable")
-bot = AsyncTeleBot(TELEGRAM_TOKEN)
+app = Application.builder().token(TELEGRAM_TOKEN).build()
 logging.info("Telegram Bot initialized successfully.")
 print("Telegram Bot initialized with token:", TELEGRAM_TOKEN[:10] + "...")
 
@@ -233,16 +234,540 @@ async def start(message):
                               "/stop - Stop monitoring")
 
 @bot.message_handler(commands=['help'])
-async def help_command(message):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Welcome to Nepse AI Trading Bot! Available commands:\n"
+        "/start - Show this message\n"
+        "/help - List all available commands\n"
+        "/monitor - Start monitoring stocks\n"
+        "/status - Check bot and market status\n"
+        "/opportunities - Get good stock opportunities\n"
+        "/stop - Stop monitoring"
+    )import os
+import asyncio
+import re
+from datetime import datetime, time as dt_time
+import logging
+import requests
+from bs4 import BeautifulSoup
+from nepse.core.client import Client
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
+
+print("Starting NEPSE Alert Bot...")
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Initialize Telegram Bot
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise ValueError("Please set the TELEGRAM_TOKEN environment variable.")
+app = Application.builder().token(TELEGRAM_TOKEN).build()
+logging.info(f"Telegram Bot initialized successfully. TELEGRAM_TOKEN: {TELEGRAM_TOKEN[:10]}...")
+
+# NEPSE Trading Hours: Sunday to Thursday, 11 AM to 3 PM
+TRADING_DAYS = [0, 1, 2, 3, 4]  # Monday to Friday
+TRADING_HOURS_START = dt_time(11, 0)  # 11:00 AM
+TRADING_HOURS_END = dt_time(15, 0)  # 3:00 PM
+
+# Global flag to control monitoring
+monitoring_active = False
+
+def is_trading_hours():
+    current_time = datetime.now().time()
+    current_day = datetime.now().weekday()
+    return current_day in TRADING_DAYS and TRADING_HOURS_START <= current_time <= TRADING_HOURS_END
+
+async def fetch_nepse_data(max_retries=3, delay=5):
+    logging.info("Fetching NEPSE data...")
+    for attempt in range(max_retries):
+        try:
+            nepse_market_client = Client()
+            stock_data = await nepse_market_client.get_today_price() if hasattr(nepse_market_client, 'get_today_price') else []
+            historical_data = await nepse_market_client.get_historical_data(days=30) if hasattr(nepse_market_client, 'get_historical_data') else []
+            logging.debug(f"Stock data: {stock_data[:2] if stock_data else None}")
+            logging.debug(f"Historical data: {historical_data[:2] if historical_data else None}")
+            return stock_data, historical_data
+        except Exception as e:
+            logging.error(f"Attempt {attempt + 1}/{max_retries} - Error fetching NEPSE data: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(delay)
+            else:
+                logging.info("Using mock data as fallback due to max retries...")
+                mock_stock_data = [
+                    {'symbol': 'MOCK1', 'closingPrice': 109.00},
+                    {'symbol': 'MOCK2', 'closingPrice': 200.00}
+                ]
+                return mock_stock_data, []
+
+# News keywords for scanning
+NEWS_KEYWORDS = [
+    # Corporate Actions
+    r"dividend declaration", r"bonus share", r"rights issue", r"merger", r"share buyback",
+    # Financial Results
+    r"quarterly results", r"net profit", r"earnings per share|EPS", r"revised guidance",
+    # Regulatory & SEBON Notices
+    r"trading halt", r"SEBON guidelines", r"IPO",
+    # Macroeconomic Events
+    r"rate hike", r"inflation data", r"GDP growth",
+    # Mergers & Acquisitions
+    r"due diligence", r"definitive agreement",
+    # Market Sentiment
+    r"rumor", r"insider trading", r"upgrade",
+    # Technical Triggers
+    r"circuit breaker", r"floorsheet anomaly",
+    # Nepali terms
+    r"मुनाफा", r"बोनस", r"हकप्रद"  # profit, bonus, rights issue
+]
+
+async def fetch_news():
+    try:
+        logging.info("Fetching news from sharesansar.com...")
+        response = requests.get("https://www.sharesansar.com/category/latest")
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        news_items = soup.find_all('h5', class_='mb-0')
+        news_texts = [item.get_text(strip=True) for item in news_items]
+        return news_texts
+    except Exception as e:
+        logging.error(f"Error fetching news: {e}")
+        return []
+
+async def analyze_news(news_texts):
+    analyzer = SentimentIntensityAnalyzer()
+    relevant_news = []
+    for text in news_texts:
+        # Check for any matching keywords
+        for keyword in NEWS_KEYWORDS:
+            if re.search(keyword, text, re.IGNORECASE):
+                sentiment = analyzer.polarity_scores(text)
+                relevant_news.append({
+                    'text': text,
+                    'sentiment': sentiment['compound'],
+                    'keywords': keyword
+                })
+                break
+    return relevant_news
+
+async def identify_good_opportunities(analysis_results):
+    for stock in analysis_results:
+        stock['rsi'] < 30 and  # Oversold
+        stock['ma_trend'] == "Above MA" and  # Upward trend
+        stock['sentiment'] > 0.3 and  # Positive news
+        stock['volume_spike'] > 5 and  # High volatility
+        stock['volume_spike']  # Volume spike
+
+        good_opportunities = []
+        stock_data, historical_data = await fetch_nepse_data()
+
+        # Mock analysis for simplicity
+        for stock in stock_data:
+            analysis = {
+                'symbol': stock['symbol'],
+                'rsi': stock['closingPrice'] % 100,  # Simplified mock RSI
+                'ma_trend': "Above MA" if stock['closingPrice'] > 150 else "Below MA",
+                'volume_spike': stock['closingPrice'] / 20,
+                'current_price': stock['closingPrice']
+            }
+
+            # Analyze news
+            news_texts = await fetch_news()
+            news_analysis = await analyze_news(news_texts)
+            analysis['news'] = news_analysis
+            analysis['sentiment'] = sum(item['sentiment'] for item in news_analysis) / len(news_analysis) if news_analysis else 0
+
+            if (
+                analysis['rsi'] < 30 and  # Oversold
+                analysis['ma_trend'] == "Above MA" and  # Upward trend
+                analysis['sentiment'] > 0.3 and  # Positive news
+                analysis['volume_spike'] > 5  # High volume spike
+            ):
+                good_opportunities.append({
+                    'name': stock['symbol'],
+                    'rsi': stock['rsi'],
+                    'ma_trend': stock['ma_trend'],
+                    'sentiment': stock['sentiment'],
+                    'volume_spike': stock['volume_spike'],
+                    'current_price': stock['current_price'],
+                    'news': stock['news']  # Include news for the output
+                })
+        return good_opportunities
+
+# Bot Message Handler Commands: ['start']
+async def start(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = message.chat.id
-    logging.info(f"Received /help command from user {user_id}")
-    await bot.reply_to(message, "Welcome to Nepse AI Trading Bot! Available commands:\n"
-                              "/start - Show this message\n"
-                              "/help - List all available commands\n"
-                              "/monitor - Start monitoring stocks\n"
-                              "/status - Check bot and market status\n"
-                              "/opportunities - Get good stock opportunities\n"
-                              "/stop - Stop monitoring")
+    logging.info(f"Received /start command from user {user_id}")
+    await message.reply_text(
+        "Welcome to Nepse AI Trading Bot! Available commands:\n"
+        "/start - Show this message\n"
+        "/help - List all available commands\n"
+        "/monitor - Start monitoring stocks\n"
+        "/status - Check bot and market status\n"
+        "/opportunities - Get good stock opportunities\n"
+        "/stop - Stop monitoring"
+    )
+
+# Bot Message Handler Commands: ['help']
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Welcome to Nepse AI Trading Bot! Available commands:\n"
+        "/start - Show this message\n"
+        "/help - List all available commands\n"
+        "/monitor - Start monitoring stocks\n"
+        "/status - Check bot and market status\n"
+        "/opportunities - Get good stock opportunities\n"
+        "/stop - Stop monitoring"
+    )
+
+# Bot Message Handler Commands: ['status']
+async def status(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = message.chat.id
+    logging.info(f"Received /status command from user {user_id}")
+    market_status = "OPEN" if is_trading_hours() else "CLOSED"
+    bot_status = "monitoring" if monitoring_active else "idle"
+    await message.reply_text(f"Bot Status: {bot_status}\nMarket Status: NEPSE is {market_status}")
+
+# Bot Message Handler Commands: ['opportunities']
+async def opportunities(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = message.chat.id
+    logging.info(f"Received /opportunities command from user {user_id}")
+    good_opps = await identify_good_opportunities([])
+    if not good_opps:
+        await message.reply_text("No good opportunities found at the moment.")
+        return
+    for opp in good_opps:
+        news_summary = "\n".join([f"- {item['text']} (Sentiment: {item['sentiment']:.2f})" for item in opp['news']]) if opp['news'] else "No relevant news."
+        await message.reply_text(
+            f"Opportunity: {opp['name']}\n"
+            f"RSI: {opp['rsi']}\n"
+            f"MA Trend: {opp['ma_trend']}\n"
+            f"Sentiment: {opp['sentiment']:.2f}\n"
+            f"Volume Spike: {opp['volume_spike']:.2f}\n"
+            f"Price: {opp['current_price']}\n"
+            f"News:\n{news_summary}"
+        )
+
+# Add handlers to the application
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help))
+app.add_handler(CommandHandler("status", status))
+app.add_handler(CommandHandler("opportunities", opportunities))
+
+# Start the bot
+app.run_polling()import os
+import asyncio
+import re
+from datetime import datetime, time as dt_time
+import logging
+import requests
+from bs4 import BeautifulSoup
+from nepse.core.client import Client
+from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram import Update
+
+print("Starting NEPSE Alert Bot...")
+
+# Set up logging
+logging.basicConfig(level=logging.DEBUG, format="%(asctime)s - %(levelname)s - %(message)s")
+
+# Initialize Telegram Bot
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+if not TELEGRAM_TOKEN:
+    raise ValueError("Please set the TELEGRAM_TOKEN environment variable.")
+app = Application.builder().token(TELEGRAM_TOKEN).build()
+logging.info(f"Telegram Bot initialized successfully. TELEGRAM_TOKEN: {TELEGRAM_TOKEN[:10]}...")
+
+# NEPSE Trading Hours: Sunday to Thursday, 11 AM to 3 PM
+TRADING_DAYS = [0, 1, 2, 3, 4]  # Monday to Friday
+TRADING_HOURS_START = dt_time(11, 0)  # 11:00 AM
+TRADING_HOURS_END = dt_time(15, 0)  # 3:00 PM
+
+# Global flag to control monitoring
+monitoring_active = False
+
+def is_trading_hours():
+    current_time = datetime.now().time()
+    current_day = datetime.now().weekday()
+    return current_day in TRADING_DAYS and TRADING_HOURS_START <= current_time <= TRADING_HOURS_END
+
+async def fetch_nepse_data(max_retries=3, delay=5):
+    logging.info("Fetching NEPSE data...")
+    for attempt in range(max_retries):
+        try:
+            nepse_market_client = Client()
+            stock_data = await nepse_market_client.get_today_price() if hasattr(nepse_market_client, 'get_today_price') else []
+            historical_data = await nepse_market_client.get_historical_data(days=30) if hasattr(nepse_market_client, 'get_historical_data') else []
+            logging.debug(f"Stock data: {stock_data[:2] if stock_data else None}")
+            logging.debug(f"Historical data: {historical_data[:2] if historical_data else None}")
+            return stock_data, historical_data
+        except Exception as e:
+            logging.error(f"Attempt {attempt + 1}/{max_retries} - Error fetching NEPSE data: {e}")
+            if attempt < max_retries - 1:
+                await asyncio.sleep(delay)
+            else:
+                logging.info("Using mock data as fallback due to max retries...")
+                mock_stock_data = [
+                    {'symbol': 'MOCK1', 'closingPrice': 109.00},
+                    {'symbol': 'MOCK2', 'closingPrice': 200.00}
+                ]
+                return mock_stock_data, []
+
+# News keywords for scanning
+NEWS_KEYWORDS = [
+    # Corporate Actions
+    r"dividend declaration", r"bonus share", r"rights issue", r"merger", r"share buyback",
+    # Financial Results
+    r"quarterly results", r"net profit", r"earnings per share|EPS", r"revised guidance",
+    # Regulatory & SEBON Notices
+    r"trading halt", r"SEBON guidelines", r"IPO",
+    # Macroeconomic Events
+    r"rate hike", r"inflation data", r"GDP growth",
+    # Mergers & Acquisitions
+    r"due diligence", r"definitive agreement",
+    # Market Sentiment
+    r"rumor", r"insider trading", r"upgrade",
+    # Technical Triggers
+    r"circuit breaker", r"floorsheet anomaly",
+    # Nepali terms
+    r"मुनाफा", r"बोनस", r"हकप्रद"  # profit, bonus, rights issue
+]
+
+# Educational explanations for news keywords
+NEWS_EXPLANATIONS = {
+    "dividend declaration": "This may increase stock demand due to expected payouts.",
+    "bonus share": "This increases the number of shares, potentially boosting liquidity.",
+    "rights issue": "Shareholders can buy more shares, often at a discount, affecting price.",
+    "merger": "Mergers can lead to synergies but may also introduce uncertainty.",
+    "share buyback": "This reduces outstanding shares, often signaling confidence.",
+    "quarterly results": "Results can drive volatility based on performance.",
+    "net profit": "Higher profits typically boost stock price.",
+    "earnings per share|EPS": "EPS reflects profitability per share, a key metric.",
+    "revised guidance": "Guidance changes can shift investor expectations.",
+    "trading halt": "Halts pause trading, often due to major news.",
+    "SEBON guidelines": "Regulatory changes can impact market operations.",
+    "IPO": "New listings can attract investor interest.",
+    "rate hike": "Higher rates may reduce borrowing, impacting growth stocks.",
+    "inflation data": "Inflation affects purchasing power and interest rates.",
+    "GDP growth": "Economic growth can boost market confidence.",
+    "due diligence": "A step in M&A, indicating a deal is progressing.",
+    "definitive agreement": "A confirmed deal, often leading to price movements.",
+    "rumor": "Rumors can drive short-term volatility.",
+    "insider trading": "Insider activity may signal confidence or concern.",
+    "upgrade": "Analyst upgrades often lead to price increases.",
+    "circuit breaker": "Trading pauses to prevent extreme volatility.",
+    "floorsheet anomaly": "Unusual trading activity may indicate manipulation.",
+    "मुनाफा": "Higher profits typically boost stock price.",
+    "बोनस": "This increases the number of shares, potentially boosting liquidity.",
+    "हकप्रद": "Shareholders can buy more shares, often at a discount."
+}
+
+async def fetch_news():
+    try:
+        logging.info("Fetching news from sharesansar.com...")
+        response = requests.get("https://www.sharesansar.com/category/latest")
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        news_items = soup.find_all('h5', class_='mb-0')
+        news_texts = [item.get_text(strip=True) for item in news_items]
+        return news_texts
+    except Exception as e:
+        logging.error(f"Error fetching news: {e}")
+        return []
+
+async def analyze_news(news_texts):
+    analyzer = SentimentIntensityAnalyzer()
+    relevant_news = []
+    for text in news_texts:
+        # Check for any matching keywords
+        for keyword in NEWS_KEYWORDS:
+            if re.search(keyword, text, re.IGNORECASE):
+                sentiment = analyzer.polarity_scores(text)
+                relevant_news.append({
+                    'text': text,
+                    'sentiment': sentiment['compound'],
+                    'keywords': keyword
+                })
+                break
+    return relevant_news
+
+async def identify_good_opportunities(analysis_results):
+    good_opportunities = []
+    stock_data, historical_data = await fetch_nepse_data()
+
+    # Mock analysis for simplicity
+    for stock in stock_data:
+        analysis = {
+            'symbol': stock['symbol'],
+            'rsi': stock['closingPrice'] % 100,  # Simplified mock RSI
+            'ma_trend': "Above MA" if stock['closingPrice'] > 150 else "Below MA",
+            'volume_spike': stock['closingPrice'] / 20,
+            'current_price': stock['closingPrice']
+        }
+
+        # Analyze news
+        news_texts = await fetch_news()
+        news_analysis = await analyze_news(news_texts)
+        analysis['news'] = news_analysis
+        analysis['sentiment'] = sum(item['sentiment'] for item in news_analysis) / len(news_analysis) if news_analysis else 0
+
+        if (
+            analysis['rsi'] < 30 and  # Oversold
+            analysis['ma_trend'] == "Above MA" and  # Upward trend
+            analysis['sentiment'] > 0.3 and  # Positive news
+            analysis['volume_spike'] > 5  # High volume spike
+        ):
+            good_opportunities.append({
+                'name': stock['symbol'],
+                'rsi': analysis['rsi'],
+                'ma_trend': analysis['ma_trend'],
+                'sentiment': analysis['sentiment'],
+                'volume_spike': analysis['volume_spike'],
+                'current_price': analysis['current_price'],
+                'news': analysis['news']  # Include news for the output
+            })
+    return good_opportunities
+
+# Bot Message Handler Commands: ['start']
+async def start(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = message.chat.id
+    logging.info(f"Received /start command from user {user_id}")
+    await message.reply_text(
+        "Welcome to Nepse AI Trading Bot! Available commands:\n"
+        "/start - Show this message\n"
+        "/help - List all available commands\n"
+        "/monitor - Start monitoring stocks\n"
+        "/status - Check bot and market status\n"
+        "/opportunities - Get good stock opportunities\n"
+        "/stop - Stop monitoring"
+    )
+
+# Bot Message Handler Commands: ['help']
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(
+        "Welcome to Nepse AI Trading Bot! Available commands:\n"
+        "/start - Show this message\n"
+        "/help - List all available commands\n"
+        "/monitor - Start monitoring stocks\n"
+        "/status - Check bot and market status\n"
+        "/opportunities - Get good stock opportunities\n"
+        "/stop - Stop monitoring"
+    )
+
+# Bot Message Handler Commands: ['status']
+async def status(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = message.chat.id
+    logging.info(f"Received /status command from user {user_id}")
+    market_status = "OPEN" if is_trading_hours() else "CLOSED"
+    bot_status = "monitoring" if monitoring_active else "idle"
+    await message.reply_text(f"Bot Status: {bot_status}\nMarket Status: NEPSE is {market_status}")
+
+# Bot Message Handler Commands: ['opportunities']
+async def opportunities(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = message.chat.id
+    logging.info(f"Received /opportunities command from user {user_id}")
+    good_opps = await identify_good_opportunities([])
+    if not good_opps:
+        await message.reply_text("No good opportunities found at the moment.")
+        return
+    for opp in good_opps:
+        news_summary = ""
+        if opp['news']:
+            for item in opp['news']:
+                explanation = next((NEWS_EXPLANATIONS[key] for key in NEWS_EXPLANATIONS if re.search(key, item['text'], re.IGNORECASE)), "This news may impact the stock.")
+                news_summary += f"- {item['text']} (Sentiment: {item['sentiment']:.2f})\n  * {explanation}\n"
+        else:
+            news_summary = "No relevant news."
+        await message.reply_text(
+            f"Opportunity: {opp['name']}\n"
+            f"RSI: {opp['rsi']}\n"
+            f"MA Trend: {opp['ma_trend']}\n"
+            f"Sentiment: {opp['sentiment']:.2f}\n"
+            f"Volume Spike: {opp['volume_spike']:.2f}\n"
+            f"Price: {opp['current_price']}\n"
+            f"News:\n{news_summary}"
+        )
+
+# Bot Message Handler Commands: ['monitor']
+async def monitor(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global monitoring_active
+    user_id = message.chat.id
+    logging.info(f"Received /monitor command from user {user_id}")
+    if monitoring_active:
+        await message.reply_text("Monitoring is already active.")
+        return
+    monitoring_active = True
+    await message.reply_text("Started monitoring NEPSE stocks. Use /stop to stop monitoring.")
+    
+    while monitoring_active:
+        if is_trading_hours():
+            stock_data, historical_data = await fetch_nepse_data()
+            good_opps = await identify_good_opportunities(stock_data)
+            if good_opps:
+                for opp in good_opps:
+                    news_summary = ""
+                    if opp['news']:
+                        for item in opp['news']:
+                            explanation = next((NEWS_EXPLANATIONS[key] for key in NEWS_EXPLANATIONS if re.search(key, item['text'], re.IGNORECASE)), "This news may impact the stock.")
+                            news_summary += f"- {item['text']} (Sentiment: {item['sentiment']:.2f})\n  * {explanation}\n"
+                    else:
+                        news_summary = "No relevant news."
+                    await message.reply_text(
+                        f"Opportunity Alert: {opp['name']}\n"
+                        f"RSI: {opp['rsi']}\n"
+                        f"MA Trend: {opp['ma_trend']}\n"
+                        f"Sentiment: {opp['sentiment']:.2f}\n"
+                        f"Volume Spike: {opp['volume_spike']:.2f}\n"
+                        f"Price: {opp['current_price']}\n"
+                        f"News:\n{news_summary}"
+                    )
+        else:
+            await message.reply_text("Market is closed. Using mock data for testing.")
+            stock_data, historical_data = await fetch_nepse_data()
+            good_opps = await identify_good_opportunities(stock_data)
+            if good_opps:
+                for opp in good_opps:
+                    news_summary = ""
+                    if opp['news']:
+                        for item in opp['news']:
+                            explanation = next((NEWS_EXPLANATIONS[key] for key in NEWS_EXPLANATIONS if re.search(key, item['text'], re.IGNORECASE)), "This news may impact the stock.")
+                            news_summary += f"- {item['text']} (Sentiment: {item['sentiment']:.2f})\n  * {explanation}\n"
+                    else:
+                        news_summary = "No relevant news."
+                    await message.reply_text(
+                        f"Mock Opportunity Alert: {opp['name']}\n"
+                        f"RSI: {opp['rsi']}\n"
+                        f"MA Trend: {opp['ma_trend']}\n"
+                        f"Sentiment: {opp['sentiment']:.2f}\n"
+                        f"Volume Spike: {opp['volume_spike']:.2f}\n"
+                        f"Price: {opp['current_price']}\n"
+                        f"News:\n{news_summary}"
+                    )
+        await asyncio.sleep(300)  # Check every 5 minutes
+
+# Bot Message Handler Commands: ['stop']
+async def stop(message: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    global monitoring_active
+    user_id = message.chat.id
+    logging.info(f"Received /stop command from user {user_id}")
+    if not monitoring_active:
+        await message.reply_text("Monitoring is not active.")
+        return
+    monitoring_active = False
+    await message.reply_text("Stopped monitoring NEPSE stocks.")
+
+# Add handlers to the application
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("help", help))
+app.add_handler(CommandHandler("status", status))
+app.add_handler(CommandHandler("opportunities", opportunities))
+app.add_handler(CommandHandler("monitor", monitor))
+app.add_handler(CommandHandler("stop", stop))
+
+# Start the bot
+app.run_polling()
 
 @bot.message_handler(commands=['status'])
 async def status(message):
