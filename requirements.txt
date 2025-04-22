@@ -3,3 +3,4 @@ nepse-api==0.4.1
 vaderSentiment==3.3.2
 requests
 beautifulsoup4
+attrs
